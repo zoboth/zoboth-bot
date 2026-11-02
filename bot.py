@@ -4,6 +4,13 @@
     python3 bot.py whoami                 # print the login GH_TOKEN belongs to
     python3 bot.py list                   # pending work as JSON
     python3 bot.py done <kind> <repo> <id>  # mark a mention handled (adds the bot's 👀)
+    python3 bot.py show <repo> <number>     # issue/PR metadata, conversation and (PR) diff
+    python3 bot.py comment <repo> <number> <file>  # post <file> as a comment
+    python3 bot.py review <repo> <number> <file>   # post <file> as a PR review (COMMENT)
+
+The session's GitHub proxy blocks GraphQL, and `gh pr view/diff/review/comment`
+and `gh issue view/comment` are GraphQL underneath, so all reads and writes go
+through these REST helpers.
 
 Cloud sessions only allow repo-scoped GitHub endpoints (repos/{owner}/{repo}/...)
 for the repos configured on the routine, so the notifications API is not
@@ -165,12 +172,60 @@ def cmd_list():
         print(f"# {len(work) - MAX_ITEMS} more item(s) left for the next run", file=sys.stderr)
 
 
+def served_or_exit(repo):
+    if repo not in repos():
+        sys.exit(f"{repo} is not a served repo")
+
+
 def cmd_done(kind, repo, oid):
     if kind not in REACTIONS:
         sys.exit(f"done applies to {sorted(REACTIONS)}; a review request is done by reviewing")
-    if repo not in repos():
-        sys.exit(f"{repo} is not in REPOS")
+    served_or_exit(repo)
     gh(REACTIONS[kind].format(repo=repo, id=oid), method="POST", fields={"content": MARK})
+    if not already_marked(kind, repo, oid):
+        sys.exit(f"marking {kind} {repo} {oid} did not stick")
+    print(f"marked {kind} {repo} {oid}")
+
+
+def cmd_show(repo, number):
+    served_or_exit(repo)
+    i = gh(f"repos/{repo}/issues/{number}")
+    is_pr = "pull_request" in i
+    print(f"# {'PR' if is_pr else 'Issue'} {repo}#{number}: {i['title']}")
+    print(f"# author {i['user']['login']} state {i['state']} url {i['html_url']}")
+    print(i.get("body") or "")
+    for c in gh(f"repos/{repo}/issues/{number}/comments?per_page=100", paginate=True):
+        print(f"\n## comment {c['id']} by {c['user']['login']} at {c['created_at']}\n{c.get('body') or ''}")
+    if is_pr:
+        p = gh(f"repos/{repo}/pulls/{number}")
+        print(f"\n# base {p['base']['ref']} head {p['head']['ref']} {p['head']['sha']}")
+        for c in gh(f"repos/{repo}/pulls/{number}/comments?per_page=100", paginate=True):
+            print(f"\n## review comment {c['id']} by {c['user']['login']} on {c['path']}:{c.get('line')}\n{c.get('body') or ''}")
+        diff = subprocess.run(["gh", "api", f"repos/{repo}/pulls/{number}",
+                               "-H", "Accept: application/vnd.github.diff"],
+                              check=True, capture_output=True, text=True).stdout
+        print("\n# diff\n" + diff)
+
+
+def read_body(path):
+    body = open(path, encoding="utf-8").read().strip()
+    if not body:
+        sys.exit(f"{path} is empty")
+    return body
+
+
+def cmd_comment(repo, number, path):
+    served_or_exit(repo)
+    c = gh(f"repos/{repo}/issues/{number}/comments", method="POST", fields={"body": read_body(path)})
+    print(f"commented {c['html_url']}")
+
+
+def cmd_review(repo, number, path):
+    served_or_exit(repo)
+    head = gh(f"repos/{repo}/pulls/{number}")["head"]["sha"]
+    r = gh(f"repos/{repo}/pulls/{number}/reviews", method="POST",
+           fields={"body": read_body(path), "event": "COMMENT", "commit_id": head})
+    print(f"reviewed {r['html_url']} at {head[:7]}")
 
 
 def main():
@@ -181,15 +236,21 @@ def main():
     if cmd == "whoami":
         print(gh("user")["login"])
         return
-    if cmd not in ("list", "done"):
+    if cmd not in ("list", "done", "show", "comment", "review"):
         sys.exit(__doc__)
     me = gh("user")["login"]
     if me.lower() != BOT.lower():
         sys.exit(f"GH_TOKEN belongs to {me}, not {BOT}; refusing to act")
-    if cmd == "list":
+    if cmd == "list" and len(args) == 1:
         cmd_list()
-    elif len(args) == 4:
-        cmd_done(args[1], args[2], args[3])
+    elif cmd == "done" and len(args) == 4:
+        cmd_done(*args[1:])
+    elif cmd == "show" and len(args) == 3:
+        cmd_show(*args[1:])
+    elif cmd == "comment" and len(args) == 4:
+        cmd_comment(*args[1:])
+    elif cmd == "review" and len(args) == 4:
+        cmd_review(*args[1:])
     else:
         sys.exit(__doc__)
 
