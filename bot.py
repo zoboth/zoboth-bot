@@ -24,16 +24,19 @@ Hard rules enforced here, not in the prompt:
   - never the bot's own comments
   - at most MAX_ITEMS items per run
 
-Env: GH_TOKEN (bot PAT), REPOS ("owner/repo,owner/repo"), optional BOT,
-LOOKBACK_HOURS (default 6), MAX_ITEMS (default 5).
+Env: GH_TOKEN (bot PAT); optional REPOS ("owner/repo,..."; default = the ORG
+repos checked out in this session), BOT, ORG, LOOKBACK_HOURS (default 6),
+MAX_ITEMS (default 5).
 """
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 
 BOT = os.environ.get("BOT", "zoboth")
+ORG = os.environ.get("ORG", "modelsphere")
 LOOKBACK_HOURS = float(os.environ.get("LOOKBACK_HOURS", "6"))
 MAX_ITEMS = int(os.environ.get("MAX_ITEMS", "5"))
 TRUSTED = {"MEMBER", "OWNER"}
@@ -62,10 +65,35 @@ def gh(path, method="GET", paginate=False, fields=None):
     return json.loads(out)
 
 
+def checked_out_repos():
+    # The routine clones every configured repository next to this one, and only
+    # those repos are reachable through the session's GitHub proxy, so the
+    # checkouts themselves are the authoritative list.
+    here = os.path.dirname(os.path.abspath(__file__))
+    found = set()
+    for base in {os.getcwd(), os.path.dirname(here), os.path.dirname(os.getcwd())}:
+        try:
+            names = os.listdir(base)
+        except OSError:
+            continue
+        for name in names:
+            d = os.path.join(base, name)
+            if not os.path.isdir(os.path.join(d, ".git")):
+                continue
+            url = subprocess.run(["git", "-C", d, "remote", "get-url", "origin"],
+                                 capture_output=True, text=True).stdout.strip()
+            m = re.search(r"github\.com[:/]([^/]+/[^/]+?)(?:\.git)?/?$", url)
+            if m:
+                found.add(m.group(1))
+    return sorted(found)
+
+
 def repos():
     r = [x.strip() for x in os.environ.get("REPOS", "").split(",") if x.strip()]
     if not r:
-        sys.exit("REPOS is not set (comma-separated owner/repo list)")
+        r = [x for x in checked_out_repos() if x.split("/")[0].lower() == ORG.lower()]
+    if not r:
+        sys.exit(f"no {ORG} repos: set REPOS or add them to the routine's repositories")
     return r
 
 
@@ -127,7 +155,9 @@ def scan_repo(repo, since):
 def cmd_list():
     since = (datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)).strftime("%Y-%m-%dT%H:%M:%SZ")
     work = []
-    for repo in repos():
+    served = repos()
+    print(f"# scanning {len(served)} repo(s): {', '.join(served)}", file=sys.stderr)
+    for repo in served:
         work += scan_repo(repo, since)
     json.dump(work[:MAX_ITEMS], sys.stdout, ensure_ascii=False, indent=1)
     print()
