@@ -6,7 +6,8 @@
     python3 bot.py done <kind> <repo> <id>  # mark a mention handled (adds the bot's 👀)
     python3 bot.py show <repo> <number>     # issue/PR metadata, conversation and (PR) diff
     python3 bot.py comment <repo> <number> <file>  # post <file> as a comment
-    python3 bot.py review <repo> <number> <file>   # post <file> as a PR review (COMMENT)
+    python3 bot.py review <repo> <number> <file> [comment|approve|request-changes]
+                                            # post <file> as a PR review (default comment)
 
 The session's GitHub proxy blocks GraphQL, and `gh pr view/diff/review/comment`
 and `gh issue view/comment` are GraphQL underneath, so all reads and writes go
@@ -220,12 +221,24 @@ def cmd_comment(repo, number, path):
     print(f"commented {c['html_url']}")
 
 
-def cmd_review(repo, number, path):
+EVENTS = {"comment": "COMMENT", "approve": "APPROVE", "request-changes": "REQUEST_CHANGES"}
+
+
+def cmd_review(repo, number, path, verdict="comment"):
     served_or_exit(repo)
+    if verdict not in EVENTS:
+        sys.exit(f"verdict must be one of {sorted(EVENTS)}")
+    if verdict == "approve":
+        # The bot's approval is meant to be advisory. GitHub counts approvals
+        # only from users with write access, so refuse to approve if the bot
+        # ever gains it -- that would let a PR author merge on the bot's word.
+        perms = gh(f"repos/{repo}").get("permissions") or {}
+        if perms.get("push") or perms.get("maintain") or perms.get("admin"):
+            sys.exit(f"{BOT} can push to {repo}; its approval would count, refusing to approve")
     head = gh(f"repos/{repo}/pulls/{number}")["head"]["sha"]
     r = gh(f"repos/{repo}/pulls/{number}/reviews", method="POST",
-           fields={"body": read_body(path), "event": "COMMENT", "commit_id": head})
-    print(f"reviewed {r['html_url']} at {head[:7]}")
+           fields={"body": read_body(path), "event": EVENTS[verdict], "commit_id": head})
+    print(f"reviewed ({r['state']}) {r['html_url']} at {head[:7]}")
 
 
 def main():
@@ -249,7 +262,7 @@ def main():
         cmd_show(*args[1:])
     elif cmd == "comment" and len(args) == 4:
         cmd_comment(*args[1:])
-    elif cmd == "review" and len(args) == 4:
+    elif cmd == "review" and len(args) in (4, 5):
         cmd_review(*args[1:])
     else:
         sys.exit(__doc__)
