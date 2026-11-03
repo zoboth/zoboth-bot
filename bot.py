@@ -160,6 +160,22 @@ def scan_repo(repo, since):
     return items
 
 
+def fold_mentions_into_reviews(work):
+    # A PR that both requests the bot's review and mentions it would otherwise
+    # be reviewed twice. Keep one review_requested item and carry the mentions
+    # on it; they still need `done` after the review is posted.
+    reviews = {(i["repo"], i["number"]): i for i in work if i["kind"] == "review_requested"}
+    out = []
+    for i in work:
+        r = reviews.get((i["repo"], i["number"]))
+        if r is not None and i["kind"] != "review_requested":
+            r.setdefault("mentions", []).append(
+                {k: i[k] for k in ("kind", "repo", "id", "author", "url", "body")})
+            continue
+        out.append(i)
+    return out
+
+
 def cmd_list():
     since = (datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)).strftime("%Y-%m-%dT%H:%M:%SZ")
     work = []
@@ -167,6 +183,7 @@ def cmd_list():
     print(f"# scanning {len(served)} repo(s): {', '.join(served)}", file=sys.stderr)
     for repo in served:
         work += scan_repo(repo, since)
+    work = fold_mentions_into_reviews(work)
     json.dump(work[:MAX_ITEMS], sys.stdout, ensure_ascii=False, indent=1)
     print()
     if len(work) > MAX_ITEMS:

@@ -16,7 +16,9 @@ bot.py helpers below (they call the REST API).
      verdict, see below) instead of `bot.py comment`, then still run `bot.py done`.
    - kind review_requested: write the review to a file and post it:
      python3 bot.py review <repo> <number> <file> <verdict>
-     Posting the review is what marks it done.
+     Posting the review is what marks it done. If the item carries "mentions",
+     take their requests into account in the same review, then run
+     python3 bot.py done <kind> <repo> <id> for each mention.
    Reviews: blockers first, then non-blocking notes. Answer in the language of
    the request. Pick the verdict from your own findings and pass it as the last
    argument of bot.py review:
