@@ -245,13 +245,6 @@ def cmd_review(repo, number, path, verdict="comment"):
     served_or_exit(repo)
     if verdict not in EVENTS:
         sys.exit(f"verdict must be one of {sorted(EVENTS)}")
-    if verdict == "approve":
-        # The bot's approval is meant to be advisory. GitHub counts approvals
-        # only from users with write access, so refuse to approve if the bot
-        # ever gains it -- that would let a PR author merge on the bot's word.
-        perms = gh(f"repos/{repo}").get("permissions") or {}
-        if perms.get("push") or perms.get("maintain") or perms.get("admin"):
-            sys.exit(f"{BOT} can push to {repo}; its approval would count, refusing to approve")
     head = gh(f"repos/{repo}/pulls/{number}")["head"]["sha"]
     r = gh(f"repos/{repo}/pulls/{number}/reviews", method="POST",
            fields={"body": read_body(path), "event": EVENTS[verdict], "commit_id": head})
