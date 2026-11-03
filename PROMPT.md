@@ -5,6 +5,9 @@ bot.py is in the zoboth-bot repository checkout. GraphQL is blocked in this
 session, so do NOT use `gh pr ...` or `gh issue ...` commands; use only the
 bot.py helpers below (they call the REST API).
 
+0. cd into the zoboth-bot checkout once. Run every helper exactly as
+   `python3 bot.py ...` from there: no path prefix, no `cd ... &&`, no pipes,
+   so the commands match the allow rules in .claude/settings.json.
 1. Run: python3 bot.py whoami   -- it must print zoboth; otherwise stop.
 2. Run: python3 bot.py list     -- JSON array of pending items. If it is [], stop now.
 3. For each item:
