@@ -8,6 +8,16 @@
     python3 bot.py comment <repo> <number> <file>  # post <file> as a comment
     python3 bot.py review <repo> <number> <file> [comment|approve|request-changes]
                                             # post <file> as a PR review (default comment)
+    python3 bot.py enqueue <comment|review> <repo> <number> <file> [verdict] [--mark kind:id ...]
+                                            # write a queue/*.json item instead of posting
+    python3 bot.py post-queue               # (GitHub Actions) post and clear queue/*.json
+
+Cloud routines may refuse direct GitHub writes, so the routine can enqueue
+instead: it writes queue/*.json, commits and pushes to this repo, and the
+post-queue workflow posts with the bot token. post-queue re-scans the target
+repo and only acts on a PR/issue that really has a pending request from a
+trusted author, and only marks mentions that are pending, so a queue file
+cannot make the bot post anywhere it was not asked to.
 
 The session's GitHub proxy blocks GraphQL, and `gh pr view/diff/review/comment`
 and `gh issue view/comment` are GraphQL underneath, so all reads and writes go
@@ -251,6 +261,89 @@ def cmd_review(repo, number, path, verdict="comment"):
     print(f"reviewed ({r['state']}) {r['html_url']} at {head[:7]}")
 
 
+QUEUE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "queue")
+
+
+def cmd_enqueue(args):
+    marks = []
+    rest = []
+    it = iter(args)
+    for a in it:
+        if a == "--mark":
+            kind, _, oid = next(it, "").partition(":")
+            if kind not in REACTIONS or not oid.isdigit():
+                sys.exit(f"--mark needs <kind>:<id> with kind in {sorted(REACTIONS)}")
+            marks.append({"kind": kind, "id": int(oid)})
+        else:
+            rest.append(a)
+    if len(rest) not in (4, 5) or rest[0] not in ("comment", "review"):
+        sys.exit("enqueue <comment|review> <repo> <number> <file> [verdict] [--mark kind:id ...]")
+    action, repo, number, path = rest[:4]
+    verdict = rest[4] if len(rest) == 5 else "comment"
+    if action == "review" and verdict not in EVENTS:
+        sys.exit(f"verdict must be one of {sorted(EVENTS)}")
+    served_or_exit(repo)
+    item = {"action": action, "repo": repo, "number": int(number), "verdict": verdict,
+            "body": read_body(path), "marks": marks}
+    os.makedirs(QUEUE_DIR, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    out = os.path.join(QUEUE_DIR, f"{stamp}-{repo.replace('/', '_')}-{number}.json")
+    with open(out, "w", encoding="utf-8") as f:
+        json.dump(item, f, ensure_ascii=False, indent=1)
+    print(f"queued {os.path.relpath(out)}")
+
+
+def cmd_post_queue():
+    # Runs in GitHub Actions with the bot token. Each item is checked against a
+    # fresh scan of its repo before anything is posted.
+    if not os.path.isdir(QUEUE_DIR):
+        print("queue empty"); return
+    since = (datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    failed = 0
+    for name in sorted(os.listdir(QUEUE_DIR)):
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(QUEUE_DIR, name)
+        try:
+            item = json.load(open(path, encoding="utf-8"))
+            repo, number = item["repo"], int(item["number"])
+            if repo.split("/")[0].lower() != ORG.lower():
+                raise ValueError(f"{repo} is outside {ORG}")
+            pending = [i for i in fold_mentions_into_reviews(scan_repo(repo, since))
+                       if i["number"] == number]
+            if not pending:
+                raise ValueError(f"no pending request on {repo}#{number}")
+            allowed_marks = set()
+            for i in pending:
+                if i["kind"] in REACTIONS:
+                    allowed_marks.add((i["kind"], int(i["id"])))
+                for m in i.get("mentions", []):
+                    allowed_marks.add((m["kind"], int(m["id"])))
+            marks = [(m["kind"], int(m["id"])) for m in item.get("marks", [])]
+            bad = [m for m in marks if m not in allowed_marks]
+            if bad:
+                raise ValueError(f"marks not pending on {repo}#{number}: {bad}")
+            tmp = path + ".body"
+            open(tmp, "w", encoding="utf-8").write(item["body"])
+            os.environ["REPOS"] = repo
+            if item["action"] == "review":
+                cmd_review(repo, str(number), tmp, item.get("verdict", "comment"))
+            else:
+                cmd_comment(repo, str(number), tmp)
+            os.remove(tmp)
+            for kind, oid in marks:
+                cmd_done(kind, repo, str(oid))
+            os.remove(path)
+        except (Exception, SystemExit) as e:  # keep going; a bad item must not block the rest
+            print(f"SKIP {name}: {e}", file=sys.stderr)
+            if isinstance(e, (ValueError, KeyError)):
+                os.remove(path)          # invalid or stale: drop it, do not retry forever
+            else:
+                failed += 1              # transient (API error): keep for the next push
+    if failed:
+        sys.exit(f"{failed} item(s) failed and stay queued")
+
+
 def main():
     if not os.environ.get("GH_TOKEN"):
         sys.exit("GH_TOKEN is not set")
@@ -259,7 +352,7 @@ def main():
     if cmd == "whoami":
         print(gh("user")["login"])
         return
-    if cmd not in ("list", "done", "show", "comment", "review"):
+    if cmd not in ("list", "done", "show", "comment", "review", "enqueue", "post-queue"):
         sys.exit(__doc__)
     me = gh("user")["login"]
     if me.lower() != BOT.lower():
@@ -274,6 +367,10 @@ def main():
         cmd_comment(*args[1:])
     elif cmd == "review" and len(args) in (4, 5):
         cmd_review(*args[1:])
+    elif cmd == "enqueue":
+        cmd_enqueue(args[1:])
+    elif cmd == "post-queue" and len(args) == 1:
+        cmd_post_queue()
     else:
         sys.exit(__doc__)
 
