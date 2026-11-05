@@ -12,6 +12,9 @@ bot.py helpers below (they call the REST API).
 2. Run: python3 bot.py list     -- JSON array of pending items. If it is [], stop now.
 3. For each item:
    - Read the context: python3 bot.py show <repo> <number>
+   - If the item's "state" is "closed" or "merged", do not review it: reply with
+     one short comment saying it is already closed/merged (answer a plain
+     question normally), then mark it done.
    - Write the reply to a file under /tmp and post it:
        mention asking a question or a change -> python3 bot.py comment <repo> <number> <file>
        mention asking for a review           -> python3 bot.py review <repo> <number> <file> <verdict>

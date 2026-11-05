@@ -173,6 +173,13 @@ def scan_repo(repo, since):
         items.append({"kind": "review_requested", "repo": repo, "id": p["number"],
                       "number": p["number"], "author": p["user"]["login"],
                       "url": p["html_url"], "head": head, "body": p.get("body") or ""})
+    states = {}
+    for it in items:
+        n = it["number"]
+        if n not in states:
+            i = gh(f"repos/{repo}/issues/{n}")
+            states[n] = "merged" if (i.get("pull_request") or {}).get("merged_at") else i.get("state")
+        it["state"] = states[n]
     return items
 
 
