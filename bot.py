@@ -43,7 +43,8 @@ Hard rules enforced here, not in the prompt:
   - at most MAX_ITEMS items per run
 
 Env: GH_TOKEN (bot PAT); optional REPOS ("owner/repo,..."; default = the ORG
-repos checked out in this session), BOT, ORG, LOOKBACK_HOURS (default 6),
+repos checked out in this session, or with ALL_ORG_REPOS=1 every unarchived
+ORG repo), BOT, ORG, LOOKBACK_HOURS (default 6),
 MAX_ITEMS (default 5).
 """
 import json
@@ -110,6 +111,11 @@ def repos():
     r = [x.strip() for x in os.environ.get("REPOS", "").split(",") if x.strip()]
     if not r:
         r = [x for x in checked_out_repos() if x.split("/")[0].lower() == ORG.lower()]
+    if not r and os.environ.get("ALL_ORG_REPOS") == "1":
+        # Self-hosted runner: no session proxy, so serve every unarchived repo
+        # of the org; new repos are picked up without any configuration.
+        r = sorted(x["full_name"] for x in gh(f"orgs/{ORG}/repos?per_page=100", paginate=True)
+                   if not x.get("archived"))
     if not r:
         sys.exit(f"no {ORG} repos: set REPOS or add them to the routine's repositories")
     return r
