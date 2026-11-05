@@ -31,7 +31,7 @@ git -C "${BASE}/zoboth-bot" pull -q --ff-only || echo "WARN: git pull failed, us
 run() {
   docker run --rm -i \
     --env-file "${CONF}/env" \
-    -e ORG=modelsphere -e ALL_ORG_REPOS=1 \
+    -e ORG=modelsphere -e ALL_ORG_REPOS=1 -e LOOKBACK_HOURS="${LOOKBACK_HOURS:-6}" \
     -v "${BASE}/zoboth-bot:/work" -w /work \
     "${IMAGE}" "$@"
 }
