@@ -45,6 +45,6 @@ echo "pending: ${pending}"
 run claude -p "$(cat "${BASE}/zoboth-bot/PROMPT.md")" \
   --model "${MODEL}" \
   --max-turns 60 \
-  --allowedTools "Bash(python3 bot.py:*)" "Write(//tmp/**)" "Read(//tmp/**)" \
+  --allowedTools "Bash(python3 bot.py:*)" "Edit(//tmp/**)" "Write(//tmp/**)" "Read(//tmp/**)" \
   --output-format text
 echo "=== $(date '+%F %T') done"
