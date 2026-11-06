@@ -16,7 +16,7 @@ set -euo pipefail
 BASE=${BASE:-$HOME/zoboth}
 CONF=${CONF:-$HOME/.config/zoboth}
 IMAGE=${IMAGE:-zoboth-runner:latest}
-MODEL=${MODEL:-claude-sonnet-5}
+MODEL=${MODEL:-claude-opus-5-5}
 LOG=${BASE}/log/$(date +%Y%m%d).log
 mkdir -p "${BASE}/log"
 exec >>"${LOG}" 2>&1
