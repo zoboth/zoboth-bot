@@ -42,7 +42,9 @@ Hard rules enforced here, not in the prompt:
   - never the bot's own comments
   - at most MAX_ITEMS items per run
 
-Env: GH_TOKEN (bot PAT); optional REPOS ("owner/repo,..."; default = the ORG
+Env: GH_TOKEN (bot PAT); optional ONLY_REQUESTERS / EXCLUDE_REQUESTERS (comma-separated
+logins: list only items asked for by / not by them, so runs can use different models);
+optional REPOS ("owner/repo,..."; default = the ORG
 repos checked out in this session, or with ALL_ORG_REPOS=1 every unarchived
 ORG repo), BOT, ORG, LOOKBACK_HOURS (default 6),
 MAX_ITEMS (default 5).
@@ -140,6 +142,36 @@ def number_of(url):
     return int(url.rstrip("/").split("/")[-1])
 
 
+def review_requester(repo, number):
+    # Who added the bot as a reviewer: the latest review_requested event naming it.
+    who = None
+    for e in gh(f"repos/{repo}/issues/{number}/events?per_page=100", paginate=True):
+        if e.get("event") == "review_requested" and \
+           ((e.get("requested_reviewer") or {}).get("login", "").lower() == BOT.lower()):
+            who = (e.get("actor") or {}).get("login")
+    return who
+
+
+def requesters(item):
+    # Everyone who asked for this item: the mention's author, or whoever requested the review,
+    # plus the authors of mentions folded into a review item.
+    out = {(item.get("requester") or item.get("author") or "").lower()}
+    out |= {(m.get("author") or "").lower() for m in item.get("mentions", [])}
+    return out - {""}
+
+
+def tier_filter(work):
+    # ONLY_REQUESTERS / EXCLUDE_REQUESTERS (comma-separated logins) split the work between runs
+    # that use different models. An item asked for by anyone on the list counts as theirs.
+    only = {x.strip().lower() for x in os.environ.get("ONLY_REQUESTERS", "").split(",") if x.strip()}
+    excl = {x.strip().lower() for x in os.environ.get("EXCLUDE_REQUESTERS", "").split(",") if x.strip()}
+    if only:
+        work = [i for i in work if requesters(i) & only]
+    if excl:
+        work = [i for i in work if not (requesters(i) & excl)]
+    return work
+
+
 def scan_repo(repo, since):
     items = []
 
@@ -149,8 +181,8 @@ def scan_repo(repo, since):
         if already_marked(kind, repo, oid):
             return
         items.append({"kind": kind, "repo": repo, "id": oid, "number": number,
-                      "author": obj["user"]["login"], "url": obj.get("html_url"),
-                      "body": body})
+                      "author": obj["user"]["login"], "requester": obj["user"]["login"],
+                      "url": obj.get("html_url"), "body": body})
 
     for c in gh(f"repos/{repo}/issues/comments?since={since}&per_page=100", paginate=True):
         add("comment", c["id"], c, number_of(c["issue_url"]), c.get("body"))
@@ -172,6 +204,7 @@ def scan_repo(repo, since):
             continue
         items.append({"kind": "review_requested", "repo": repo, "id": p["number"],
                       "number": p["number"], "author": p["user"]["login"],
+                      "requester": review_requester(repo, p["number"]) or p["user"]["login"],
                       "url": p["html_url"], "head": head, "body": p.get("body") or ""})
     states = {}
     for it in items:
@@ -206,7 +239,7 @@ def cmd_list():
     print(f"# scanning {len(served)} repo(s): {', '.join(served)}", file=sys.stderr)
     for repo in served:
         work += scan_repo(repo, since)
-    work = fold_mentions_into_reviews(work)
+    work = tier_filter(fold_mentions_into_reviews(work))
     json.dump(work[:MAX_ITEMS], sys.stdout, ensure_ascii=False, indent=1)
     print()
     if len(work) > MAX_ITEMS:

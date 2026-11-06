@@ -16,7 +16,9 @@ set -euo pipefail
 BASE=${BASE:-$HOME/zoboth}
 CONF=${CONF:-$HOME/.config/zoboth}
 IMAGE=${IMAGE:-zoboth-runner:latest}
-MODEL=${MODEL:-claude-opus-5-5}
+MODEL=${MODEL:-claude-sonnet-5}                    # everyone else
+MODEL_PREMIUM=${MODEL_PREMIUM:-claude-opus-5-5}    # requests from PREMIUM_REQUESTERS
+PREMIUM_REQUESTERS=${PREMIUM_REQUESTERS:-zhanghaohit}
 LOG=${BASE}/log/$(date +%Y%m%d).log
 mkdir -p "${BASE}/log"
 exec >>"${LOG}" 2>&1
@@ -42,9 +44,25 @@ if [ "$(printf '%s' "${pending}" | tr -d '[:space:]')" = "[]" ]; then
 fi
 echo "pending: ${pending}"
 
-run claude -p "$(cat "${BASE}/zoboth-bot/PROMPT.md")" \
-  --model "${MODEL}" \
-  --max-turns 60 \
-  --allowedTools "Bash(python3 bot.py:*)" "Edit(//tmp/**)" "Write(//tmp/**)" "Read(//tmp/**)" \
-  --output-format text
+# Model per requester: requests from PREMIUM_REQUESTERS get MODEL_PREMIUM, everyone else MODEL.
+# Each run sees only its own items (bot.py list filters on ONLY_/EXCLUDE_REQUESTERS).
+review() {  # <model> <env filter>
+  docker run --rm -i --env-file "${CONF}/env" -e ORG=modelsphere -e ALL_ORG_REPOS=1 \
+    -e LOOKBACK_HOURS="${LOOKBACK_HOURS:-6}" -e "$2" \
+    -v "${BASE}/zoboth-bot:/work" -w /work "${IMAGE}" \
+    claude -p "$(cat "${BASE}/zoboth-bot/PROMPT.md")" \
+      --model "$1" --max-turns 60 \
+      --allowedTools "Bash(python3 bot.py:*)" "Edit(//tmp/**)" "Write(//tmp/**)" "Read(//tmp/**)" \
+      --output-format text
+}
+for tier in premium default; do
+  if [ "$tier" = premium ]; then f="ONLY_REQUESTERS=${PREMIUM_REQUESTERS}"; m="${MODEL_PREMIUM}"
+  else f="EXCLUDE_REQUESTERS=${PREMIUM_REQUESTERS}"; m="${MODEL}"; fi
+  items=$(docker run --rm --env-file "${CONF}/env" -e ORG=modelsphere -e ALL_ORG_REPOS=1 \
+    -e LOOKBACK_HOURS="${LOOKBACK_HOURS:-6}" -e "$f" -v "${BASE}/zoboth-bot:/work" -w /work \
+    "${IMAGE}" python3 bot.py list 2>/dev/null)
+  [ "$(printf '%s' "${items}" | tr -d '[:space:]')" = "[]" ] && continue
+  echo "--- ${tier}: ${m}"
+  review "$m" "$f"
+done
 echo "=== $(date '+%F %T') done"
