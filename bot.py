@@ -54,6 +54,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 
 BOT = os.environ.get("BOT", "zoboth")
@@ -71,6 +72,38 @@ REACTIONS = {
 }
 
 
+# Network failures between the runner and api.github.com. One `list` makes ~100
+# calls, so a few percent of resets used to abort whole cycles (2026-11-17:
+# node-4 saw "connection reset by peer" and "TLS handshake timeout" on ~10% of
+# calls, and two requested reviews were never written).
+_TRANSIENT = re.compile(
+    r"connection reset|TLS handshake timeout|i/o timeout|timed out|unexpected EOF"
+    r"|connection refused|no such host|dial tcp|HTTP 50[0234]|server error", re.I)
+# The subset that fails before the request leaves the runner. Only these are safe
+# to retry for a write: a reset after sending may already have posted the review.
+_NOT_SENT = re.compile(r"TLS handshake timeout|connection refused|no such host|dial tcp", re.I)
+GH_RETRIES = int(os.environ.get("GH_RETRIES", "4"))
+
+
+class GhError(RuntimeError):
+    pass
+
+
+def gh_run(cmd, method="GET", label=""):
+    """Run a `gh api` command line, retrying transient network failures; stdout."""
+    for attempt in range(1, GH_RETRIES + 1):
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode == 0:
+            return res.stdout
+        err = (res.stderr or res.stdout).strip()
+        retryable = _TRANSIENT if method == "GET" else _NOT_SENT
+        if attempt == GH_RETRIES or not retryable.search(err):
+            raise GhError(f"gh api {method} {label}: {err[-500:]}")
+        print(f"# retry {attempt}/{GH_RETRIES - 1} {method} {label}: "
+              f"{(err.splitlines() or [''])[-1][:200]}", file=sys.stderr)
+        time.sleep(2 ** attempt)
+
+
 def gh(path, method="GET", paginate=False, fields=None):
     cmd = ["gh", "api", "-X", method, path]
     if paginate:
@@ -78,7 +111,7 @@ def gh(path, method="GET", paginate=False, fields=None):
         cmd += ["--jq", ".[]"]
     for k, v in (fields or {}).items():
         cmd += ["-f", f"{k}={v}"]
-    out = subprocess.run(cmd, check=True, capture_output=True, text=True).stdout
+    out = gh_run(cmd, method, path)
     if not out.strip():
         return [] if paginate else None
     if paginate:
@@ -237,8 +270,17 @@ def cmd_list():
     work = []
     served = repos()
     print(f"# scanning {len(served)} repo(s): {', '.join(served)}", file=sys.stderr)
+    failed = []
     for repo in served:
-        work += scan_repo(repo, since)
+        # One unreachable repo must not hide the work found in the others; it is
+        # scanned again next cycle (the lookback outlasts several cycles).
+        try:
+            work += scan_repo(repo, since)
+        except GhError as e:
+            failed.append(repo)
+            print(f"# WARN skipped {repo} this cycle: {e}", file=sys.stderr)
+    if failed and len(failed) == len(served):
+        sys.exit(f"every repo failed to scan ({len(failed)}); GitHub unreachable?")
     work = tier_filter(fold_mentions_into_reviews(work))
     json.dump(work[:MAX_ITEMS], sys.stdout, ensure_ascii=False, indent=1)
     print()
@@ -275,9 +317,8 @@ def cmd_show(repo, number):
         print(f"\n# base {p['base']['ref']} head {p['head']['ref']} {p['head']['sha']}")
         for c in gh(f"repos/{repo}/pulls/{number}/comments?per_page=100", paginate=True):
             print(f"\n## review comment {c['id']} by {c['user']['login']} on {c['path']}:{c.get('line')}\n{c.get('body') or ''}")
-        diff = subprocess.run(["gh", "api", f"repos/{repo}/pulls/{number}",
-                               "-H", "Accept: application/vnd.github.diff"],
-                              check=True, capture_output=True, text=True).stdout
+        diff = gh_run(["gh", "api", "-H", "Accept: application/vnd.github.diff",
+                       f"repos/{repo}/pulls/{number}"], label=f"repos/{repo}/pulls/{number} (diff)")
         print("\n# diff\n" + diff)
 
 

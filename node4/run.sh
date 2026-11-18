@@ -58,9 +58,14 @@ review() {  # <model> <env filter>
 for tier in premium default; do
   if [ "$tier" = premium ]; then f="ONLY_REQUESTERS=${PREMIUM_REQUESTERS}"; m="${MODEL_PREMIUM}"
   else f="EXCLUDE_REQUESTERS=${PREMIUM_REQUESTERS}"; m="${MODEL}"; fi
-  items=$(docker run --rm --env-file "${CONF}/env" -e ORG=modelsphere -e ALL_ORG_REPOS=1 \
-    -e LOOKBACK_HOURS="${LOOKBACK_HOURS:-6}" -e "$f" -v "${BASE}/zoboth-bot:/work" -w /work \
-    "${IMAGE}" python3 bot.py list 2>/dev/null)
+  # stderr goes to the log (it used to be dropped, and under set -e a failed
+  # re-list ended the whole cycle without a trace -- 2026-11-17).
+  if ! items=$(docker run --rm --env-file "${CONF}/env" -e ORG=modelsphere -e ALL_ORG_REPOS=1 \
+      -e LOOKBACK_HOURS="${LOOKBACK_HOURS:-6}" -e "$f" -v "${BASE}/zoboth-bot:/work" -w /work \
+      "${IMAGE}" python3 bot.py list); then
+    echo "WARN: listing ${tier} items failed; skipping this tier until the next cycle"
+    continue
+  fi
   [ "$(printf '%s' "${items}" | tr -d '[:space:]')" = "[]" ] && continue
   echo "--- ${tier}: ${m}"
   review "$m" "$f"
